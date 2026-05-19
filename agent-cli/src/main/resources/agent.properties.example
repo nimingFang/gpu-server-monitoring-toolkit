@@ -1,0 +1,10 @@
+# 远程被监控 target 靶机 SSH 配置
+ssh.host=YOUR_TARGET_HOST
+ssh.port=22
+ssh.user=YOUR_SSH_USER
+# 生产环境中建议使用 ssh.privateKeyPath 密钥路径，实验环境暂用密码
+ssh.password=YOUR_PASSWORD_HERE
+
+# 探针采集控制策略
+agent.collect.interval=15
+agent.gpu.threshold.temperature=85

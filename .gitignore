@@ -1,0 +1,14 @@
+# Maven
+target/
+*.jar
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Logs
+*.log
+
+# 生产配置文件绝对不入库！
+agent-cli/src/main/resources/agent.properties
