@@ -37,7 +37,7 @@ gpu-monitor-toolkit/
 ### v0.1 — 单机 CLI MVP (当前)
 - [x] Maven 项目骨架 + 依赖管理 (OSHI / JSch / Logback / Lombok)
 - [x] 单例配置类 `AgentConfig`，读取 `agent.properties`
-- [ ] SSH 远程执行 `nvidia-smi` 并解析 GPU 名称、温度、显存
+- [x] SSH 远程执行 `nvidia-smi` 并解析 GPU 名称、温度、显存
 - [ ] OSHI 本地采集 CPU 使用率、可用内存
 - [ ] SQLite 建表与数据落库
 - [ ] 单次采集命令行入口 `AgentMain.java`
