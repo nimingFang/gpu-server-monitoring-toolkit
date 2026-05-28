@@ -6,6 +6,7 @@ import com.monitor.agent.model.GpuMetrics;
 import com.monitor.agent.parse.NvidiaSmiParser;
 import com.monitor.agent.ssh.SshConnectionManager;
 import com.monitor.agent.store.SqliteWriter;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * 探针编排入口 —— Facade/Orchestrator，串联 本地采集 → 远程采集 → 解析 → 落盘。
@@ -17,6 +18,7 @@ import com.monitor.agent.store.SqliteWriter;
  * @author nimingFang
  * @since 0.1
  */
+@Slf4j
 public class AgentMain {
 
     private static final String GPU_QUERY_CMD =
@@ -34,68 +36,65 @@ public class AgentMain {
         GpuMetrics gpu = null;
 
         try {
-            System.out.println("=== GPU Monitor Toolkit 探针启动 ===");
-            System.out.println();
+            log.info("=== GPU Monitor Toolkit 探针启动 ===");
 
             sys = runLocalCollection();
-            System.out.println();
             gpu = runRemoteCollection();
-            System.out.println();
         } catch (Exception e) {
-            System.err.println("[致命错误] 探针异常终止: " + e.getMessage());
+            log.error("[致命错误] 探针异常终止: {}", e.getMessage());
         } finally {
             // 无论采集环节全部崩还是部分败，落盘必须在 finally 中执行，
             // 确保时序连续性 —— 一条空记录比一条缺失记录对监控的价值大得多
             writer.insertMetrics(sys.cpu(), sys.mem(), gpu);
-            System.out.println("[AgentMain] 本次采集周期结束，数据已落盘。");
+            log.info("[AgentMain] 本次采集周期结束，数据已落盘。");
         }
     }
 
     private static SystemMetrics runLocalCollection() {
-        System.out.println("--- 本地 OSHI 采集 ---");
+        log.info("--- 本地 OSHI 采集 ---");
 
         double cpu = -1.0;
         long mem = -1L;
 
         try {
             cpu = OshiCollector.collectCpuUsage();
-            System.out.printf("CPU 使用率: %.2f%%%n", cpu >= 0 ? cpu : 0.0);
+            log.info("CPU 使用率: {}%", String.format("%.2f", cpu >= 0 ? cpu : 0.0));
         } catch (Exception e) {
-            System.out.println("[警告] CPU 采集失败: " + e.getMessage());
+            log.warn("CPU 采集失败: {}", e.getMessage());
         }
 
         try {
             mem = OshiCollector.collectAvailableMemory();
             double memGB = mem / (1024.0 * 1024.0 * 1024.0);
-            System.out.printf("可用内存: %.2f GB%n", memGB);
+            log.info("可用内存: {} GB", String.format("%.2f", memGB));
         } catch (Exception e) {
-            System.out.println("[警告] 内存采集失败: " + e.getMessage());
+            log.warn("内存采集失败: {}", e.getMessage());
         }
 
         return new SystemMetrics(cpu, mem);
     }
 
     private static GpuMetrics runRemoteCollection() {
-        System.out.println("--- 远程 SSH 采集 ---");
+        log.info("--- 远程 SSH 采集 ---");
 
         SshConnectionManager ssh = new SshConnectionManager();
         String result = ssh.executeCommand(GPU_QUERY_CMD);
 
         // v0.1 临时通过返回字符串前缀判断失败，v0.2 将重构为 CommandResult(value, exitCode, success) 对象
         if (result.startsWith("[执行失败]") || result.startsWith("SSH连接失败") || result.startsWith("读取命令输出时IO异常")) {
-            System.out.println("[警告] SSH 执行未成功，跳过本次 GPU 解析");
-            System.out.println("  详情: " + result.lines().findFirst().orElse("无"));
+            log.warn("SSH 执行未成功，跳过本次 GPU 解析");
+            log.warn("  详情: {}", result.lines().findFirst().orElse("无"));
             return null;
         }
 
         try {
             GpuMetrics gpu = NvidiaSmiParser.parse(result);
-            System.out.println("GPU 型号: " + gpu.getGpuName());
-            System.out.println("GPU 温度: " + gpu.getTemperature() + "°C");
-            System.out.println("GPU 显存: " + gpu.getMemoryUsed() + " / " + gpu.getMemoryTotal() + " MiB");
+            log.info("GPU 型号: {}", gpu.getGpuName());
+            log.info("GPU 温度: {}°C", gpu.getTemperature());
+            log.info("GPU 显存: {} / {} MiB", gpu.getMemoryUsed(), gpu.getMemoryTotal());
             return gpu;
         } catch (MetricsParseException e) {
-            System.out.println("[警告] GPU 数据解析失败: " + e.getMessage());
+            log.warn("GPU 数据解析失败: {}", e.getMessage());
             return null;
         }
     }
