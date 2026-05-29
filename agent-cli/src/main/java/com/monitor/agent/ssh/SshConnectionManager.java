@@ -5,6 +5,7 @@ import com.jcraft.jsch.JSch;
 import com.jcraft.jsch.JSchException;
 import com.jcraft.jsch.Session;
 import com.monitor.agent.config.AgentConfig;
+import lombok.extern.slf4j.Slf4j;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -18,13 +19,21 @@ import java.nio.charset.StandardCharsets;
  * 不维护长连接池。适合探针低频采样（≥15s）场景，避免 keep-alive 与断线
  * 重连带来的复杂度。</p>
  *
- * <p>设计模式：<strong>方法级会话隔离</strong> —— 每个命令一个独立 Session，
- * 天然隔离不同命令间的 SSH 状态干扰。</p>
+ * <p>内置<strong>指数退避重试</strong>：单次 executeCommand 内部最多重试 3 次
+ * （间隔 2s → 4s），屏蔽瞬时网络抖动。重试放在本层而非上层编排器，原因是
+ * 只有本层知道失败是"连接级"还是"业务级"——上层只能看到字符串结果，无法区分。</p>
+ *
+ * <p>设计模式：<strong>方法级会话隔离 + 指数退避重试</strong>。</p>
  *
  * @author nimingFang
- * @since 0.1
+ * @since 0.2
  */
+@Slf4j
 public class SshConnectionManager {
+
+    private static final int MAX_RETRIES = 3;
+    private static final long INITIAL_BACKOFF_MS = 2000;
+    private static final double BACKOFF_MULTIPLIER = 2.0;
 
     private final AgentConfig config;
 
@@ -33,71 +42,89 @@ public class SshConnectionManager {
     }
 
     /**
-     * 通过 SSH exec 通道执行一条命令，返回 stdout + stderr 组合文本。
+     * 通过 SSH exec 通道执行一条命令，内建指数退避重试。
      *
-     * @param command 要执行的 Shell 命令，如 "nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader"
-     * @return 命令输出。若 stderr 有内容，会以 STDERR: / STDOUT: 分段标出。
-     *         连接失败时返回异常消息文本而非抛异常，保护调用方不被单次 SSH 故障打断采集循环。
+     * @param command 要执行的 Shell 命令
+     * @return 命令输出，或失败描述文本（不抛异常以保护调用方采集循环）
      */
     public String executeCommand(String command) {
         JSch jsch = new JSch();
-        Session session = null;
-        ChannelExec channel = null;
+        long currentBackoff = INITIAL_BACKOFF_MS;
 
-        try {
-            session = jsch.getSession(config.getSshUser(), config.getSshHost(), config.getSshPort());
-            session.setPassword(config.getSshPassword());
+        // 重试放在 SSH 内部而非 AgentMain 编排层，因为只有此处能区分"网络层失败
+        // （JSchException/IOException，值得重试）"和"命令执行失败（非零 exitCode，
+        // 不重试）"。如果抛给上层，AgentMain 只能拿到结果字符串，无法判断该不该重试。
+        for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+            Session session = null;
+            ChannelExec channel = null;
 
-            // 跳过 known_hosts 检查：探针运行在内网隔离环境，第一次连接时
-            // ~/.ssh/known_hosts 不存在，若开启 StrictHostKeyChecking=ask/yes
-            // 会直接抛 JSchException，无法完成首次握手。
-            session.setConfig("StrictHostKeyChecking", "no");
-            session.connect(10000); // 10 秒超时，避免 TCP 丢包导致无限挂起
+            try {
+                session = jsch.getSession(config.getSshUser(), config.getSshHost(), config.getSshPort());
+                session.setPassword(config.getSshPassword());
 
-            channel = (ChannelExec) session.openChannel("exec");
-            channel.setCommand(command);
+                // 跳过 known_hosts 检查：探针运行在内网隔离环境，第一次连接时
+                // ~/.ssh/known_hosts 不存在，若开启 StrictHostKeyChecking=ask/yes
+                // 会直接抛 JSchException，无法完成首次握手。
+                session.setConfig("StrictHostKeyChecking", "no");
+                session.connect(10000);
 
-            // stderr 写入本地缓冲区而非直接打印到控制台，便于日志记录与解析
-            ByteArrayOutputStream errCapture = new ByteArrayOutputStream();
-            channel.setErrStream(errCapture);
+                channel = (ChannelExec) session.openChannel("exec");
+                channel.setCommand(command);
 
-            InputStream stdout = channel.getInputStream();
-            channel.connect(5000);
+                ByteArrayOutputStream errCapture = new ByteArrayOutputStream();
+                channel.setErrStream(errCapture);
 
-            String out = readAll(stdout);
-            String err = errCapture.toString(StandardCharsets.UTF_8.name());
-            
-            //获取 Linux 命令的真实退出状态码 (0 表示成功)
-            int exitStatus = channel.getExitStatus();
+                InputStream stdout = channel.getInputStream();
+                channel.connect(5000);
 
-            if (exitStatus != 0 || !err.isEmpty()) {
-                return String.format("[执行失败] ExitCode: %d\nSTDERR: %s\nSTDOUT: %s", 
-                                     exitStatus, err.trim(), out.trim());
+                String out = readAll(stdout);
+                String err = errCapture.toString(StandardCharsets.UTF_8.name());
+
+                int exitStatus = channel.getExitStatus();
+
+                if (exitStatus != 0 || !err.isEmpty()) {
+                    return String.format("[执行失败] ExitCode: %d\nSTDERR: %s\nSTDOUT: %s",
+                            exitStatus, err.trim(), out.trim());
+                }
+                return out.trim();
+            } catch (JSchException e) {
+                if (attempt == MAX_RETRIES) {
+                    return String.format("[执行失败] SSH连接彻底失败，已耗尽 %d 次重试机会: %s",
+                            MAX_RETRIES, e.getMessage());
+                }
+                log.warn("SSH连接失败 (尝试 {}/{}), {}ms 后进行指数退避重试: {}",
+                        attempt, MAX_RETRIES, currentBackoff, e.getMessage());
+            } catch (IOException e) {
+                if (attempt == MAX_RETRIES) {
+                    return String.format("[执行失败] IO读取彻底失败，已耗尽 %d 次重试机会: %s",
+                            MAX_RETRIES, e.getMessage());
+                }
+                log.warn("IO读取失败 (尝试 {}/{}), {}ms 后进行指数退避重试: {}",
+                        attempt, MAX_RETRIES, currentBackoff, e.getMessage());
+            } finally {
+                // 每次尝试后必须断开 Session，否则重试时旧连接的 TCP 端口残留
+                // 在 TIME_WAIT 状态 —— 3 次重试 → 3 个端口泄漏
+                if (channel != null) {
+                    channel.disconnect();
+                }
+                if (session != null) {
+                    session.disconnect();
+                }
             }
-            return out.trim();
-        } catch (JSchException e) {
-            return "SSH连接失败: " + e.getMessage();
-        } catch (IOException e) {
-            return "读取命令输出时IO异常: " + e.getMessage();
-        } finally {
-            // 必须显式关闭 Channel 再关闭 Session，顺序不能倒。
-            // JSch 的 Session 内部持有活跃 Channel 引用计数，
-            // 若先关 Session 可能导致 Channel 的 TCP 端口处于 TIME_WAIT 状态泄漏。
-            if (channel != null) {
-                channel.disconnect();
+
+            // 退避休眠：让 target 有时间从瞬断中恢复（sshd 重启、网络收敛）
+            try {
+                Thread.sleep(currentBackoff);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return "[执行失败] 重试等待被中断，放弃本次命令执行";
             }
-            if (session != null) {
-                session.disconnect();
-            }
+            currentBackoff = (long) (currentBackoff * BACKOFF_MULTIPLIER);
         }
+
+        return "[执行失败] SSH连接彻底失败，已耗尽 " + MAX_RETRIES + " 次重试机会";
     }
 
-    /**
-     * 将 InputStream 读取到字符串，用 UTF-8 解码。
-     *
-     * <p>Linux 系统中 nvidia-smi 输出含特殊字符（如温度单位 ℃），
-     * 必须显式声明 UTF-8。若使用系统默认编码 (GBK/Cp1252)，这些字符会变成乱码。</p>
-     */
     private String readAll(InputStream in) throws IOException {
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         byte[] chunk = new byte[4096];

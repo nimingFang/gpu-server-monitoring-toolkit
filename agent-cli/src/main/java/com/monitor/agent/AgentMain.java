@@ -122,78 +122,32 @@ public class AgentMain {
         return new SystemMetrics(cpu, mem);
     }
 
-    // private static GpuMetrics runRemoteCollection() {
-    //     log.info("--- 远程 SSH 采集 ---");
-
-    //     SshConnectionManager ssh = new SshConnectionManager();
-    //     String result = ssh.executeCommand(GPU_QUERY_CMD);
-
-    //     if (result.startsWith("[执行失败]") || result.startsWith("SSH连接失败") || result.startsWith("读取命令输出时IO异常")) {
-    //         log.warn("SSH 执行未成功，跳过本次 GPU 解析");
-    //         log.warn("  详情: {}", result.lines().findFirst().orElse("无"));
-    //         return null;
-    //     }
-
-    //     try {
-    //         GpuMetrics gpu = NvidiaSmiParser.parse(result);
-    //         log.info("GPU 型号: {}", gpu.getGpuName());
-    //         log.info("GPU 温度: {}°C", gpu.getTemperature());
-    //         log.info("GPU 显存: {} / {} MiB", gpu.getMemoryUsed(), gpu.getMemoryTotal());
-
-    //         // MVP 告警：单次超阈值即触发 log.error，v0.3 引入 N 次连续超阈值才触发的去抖动机制
-    //         int threshold = AgentConfig.getInstance().getGpuTempThreshold();
-    //         if (gpu.getTemperature() > threshold) {
-    //             log.error("[ALARM] GPU 温度严重超标! 当前: {}°C, 阈值: {}°C, 型号: {}",
-    //                     gpu.getTemperature(), threshold, gpu.getGpuName());
-    //         }
-    //         return gpu;
-    //     } catch (MetricsParseException e) {
-    //         log.warn("GPU 数据解析失败: {}", e.getMessage());
-    //         return null;
-    //     }
-    // }
     private static GpuMetrics runRemoteCollection() {
         log.info("--- 远程 SSH 采集 ---");
 
         SshConnectionManager ssh = new SshConnectionManager();
         String result = ssh.executeCommand(GPU_QUERY_CMD);
 
-        // ==========================================
-        // ⚠️ M9 测试临时注释：关掉网络拦截
-        /*
         if (result.startsWith("[执行失败]") || result.startsWith("SSH连接失败") || result.startsWith("读取命令输出时IO异常")) {
             log.warn("SSH 执行未成功，跳过本次 GPU 解析");
             log.warn("  详情: {}", result.lines().findFirst().orElse("无"));
             return null;
         }
-        */
-        // ==========================================
 
         try {
-            // ==========================================
-            // ⚠️ M9 测试临时注释：关掉真实解析，直接注入假数据
-            // GpuMetrics gpu = NvidiaSmiParser.parse(result); 
-            
-            GpuMetrics gpu = GpuMetrics.builder()
-                    .gpuName("Test-RTX-4090")
-                    .temperature(99) // 强行拉高到 99°C 触发告警
-                    .memoryUsed(100)
-                    .memoryTotal(24000)
-                    .build();
-            // ==========================================
-
+            GpuMetrics gpu = NvidiaSmiParser.parse(result);
             log.info("GPU 型号: {}", gpu.getGpuName());
             log.info("GPU 温度: {}°C", gpu.getTemperature());
             log.info("GPU 显存: {} / {} MiB", gpu.getMemoryUsed(), gpu.getMemoryTotal());
 
-            // MVP 告警逻辑
+            // MVP 告警：单次超阈值即触发 log.error，v0.3 引入 N 次连续超阈值才触发的去抖动机制
             int threshold = AgentConfig.getInstance().getGpuTempThreshold();
             if (gpu.getTemperature() > threshold) {
                 log.error("[ALARM] GPU 温度严重超标! 当前: {}°C, 阈值: {}°C, 型号: {}",
                         gpu.getTemperature(), threshold, gpu.getGpuName());
             }
             return gpu;
-        } catch (Exception e) { // 这里临时改成大 Exception 兜底
+        } catch (MetricsParseException e) {
             log.warn("GPU 数据解析失败: {}", e.getMessage());
             return null;
         }
