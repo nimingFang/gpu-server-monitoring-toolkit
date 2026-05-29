@@ -7,4 +7,4 @@ ssh.password=YOUR_PASSWORD_HERE
 
 # 探针采集控制策略
 agent.collect.interval=15
-agent.gpu.threshold.temperature=85
+alert.gpu.temp.threshold=85

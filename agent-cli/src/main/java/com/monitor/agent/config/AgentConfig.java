@@ -18,7 +18,7 @@ public class AgentConfig {
     private final String sshUser;
     private final String sshPassword;
     private final int collectInterval;
-    private final int gpuTemperatureThreshold;
+    private final int gpuTempThreshold;
 
     private AgentConfig() {
         Properties props = new Properties();
@@ -36,7 +36,7 @@ public class AgentConfig {
         this.sshUser = props.getProperty("ssh.user", "root");
         this.sshPassword = props.getProperty("ssh.password", "");
         this.collectInterval = Integer.parseInt(props.getProperty("agent.collect.interval", "15"));
-        this.gpuTemperatureThreshold = Integer.parseInt(props.getProperty("agent.gpu.threshold.temperature", "85"));
+        this.gpuTempThreshold = Integer.parseInt(props.getProperty("alert.gpu.temp.threshold", "85"));
     }
 
     public static AgentConfig getInstance() {
@@ -57,6 +57,6 @@ public class AgentConfig {
         System.out.println("SSH User: " + config.getSshUser());
         System.out.println("SSH Password: " + config.getSshPassword());
         System.out.println("Collect Interval: " + config.getCollectInterval() + "s");
-        System.out.println("GPU Temp Threshold: " + config.getGpuTemperatureThreshold() + "°C");
+        System.out.println("GPU Temp Threshold: " + config.getGpuTempThreshold() + "°C");
     }
 }
